@@ -85,40 +85,54 @@ def home():
 @app.route("/", methods=["POST"])
 def convert():
     import json as jsonlib
+    import re
 
-    raw = request.get_data(as_text=True)
+    raw = request.get_data(as_text=True).strip()
     data = None
-    parse_method = "none"
 
-    # 1. Try force-parsing the raw body as JSON (most reliable)
+    # 1. Try standard JSON parsing
     try:
         data = jsonlib.loads(raw)
-        parse_method = "raw_json"
-    except Exception as e1:
-        # 2. Try normal Flask JSON parsing
+    except Exception:
+        pass
+
+    # 2. If JSON failed, try to manually extract from broken JSON
+    #    DF might produce: {"url": "https://...webm, "fps": 20, "max_frames": 90}
+    #    where the URL value isn't properly quoted
+    if not data and raw.startswith("{"):
         try:
-            data = request.get_json(force=True, silent=False)
-            parse_method = "flask_force"
-        except Exception as e2:
-            # 3. Try form data
-            if request.form:
-                data = dict(request.form)
-                parse_method = "form"
-            # 4. Try query params
-            elif request.args:
-                data = dict(request.args)
-                parse_method = "query"
+            # Extract url value: everything between first "url": " and the next ", "
+            url_match = re.search(r'"url"\s*:\s*"(.*?)",\s*"fps"', raw)
+            fps_match = re.search(r'"fps"\s*:\s*(\d+)', raw)
+            max_match = re.search(r'"max_frames"\s*:\s*(\d+)', raw)
+
+            if url_match:
+                data = {
+                    "url": url_match.group(1),
+                    "fps": int(fps_match.group(1)) if fps_match else 10,
+                    "max_frames": int(max_match.group(1)) if max_match else 100
+                }
+        except Exception:
+            pass
+
+    # 3. If body is just a plain URL string, use it directly
+    if not data and raw.startswith("http"):
+        data = {
+            "url": raw,
+            "fps": int(request.args.get("fps", 10)),
+            "max_frames": int(request.args.get("max_frames", 100))
+        }
+
+    # 4. Try query params
+    if not data and request.args.get("url"):
+        data = dict(request.args)
 
     if not data or not isinstance(data, dict) or "url" not in data:
         return jsonify({
-            "error": "Missing 'url' in request body",
-            "hint": "Send JSON like: {\"url\": \"https://example.com/video.mp4\"}",
-            "received_content_type": request.content_type,
+            "error": "Could not parse request",
+            "hint": "Try sending JUST the video URL as the body, with fps and max_frames as query params",
+            "example": "POST /?fps=20&max_frames=90 with body: https://example.com/video.mp4",
             "received_body": raw[:1000],
-            "parse_method": parse_method,
-            "data_type": str(type(data)),
-            "data_keys": list(data.keys()) if isinstance(data, dict) else None,
-            "data_preview": str(data)[:500] if data else None
         }), 400
 
     return convert_video(data)
