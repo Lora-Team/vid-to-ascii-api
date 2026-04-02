@@ -14,8 +14,33 @@ FRAME_HEIGHT = 20
 
 def download_video(url: str) -> str:
     """Download video from URL to a temp file."""
-    tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
-    urllib.request.urlretrieve(url, tmp.name)
+    # Guess extension from URL
+    ext = ".mp4"
+    for e in [".webm", ".mp4", ".avi", ".mkv", ".mov"]:
+        if e in url.lower():
+            ext = e
+            break
+
+    tmp = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+
+    # Use a proper user agent so servers don't block us
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    })
+    with urllib.request.urlopen(req, timeout=30) as response:
+        data = response.read()
+        tmp.write(data)
+        tmp.close()
+
+    # Check if we actually got a video and not an HTML error page
+    file_size = os.path.getsize(tmp.name)
+    if file_size < 1000:
+        with open(tmp.name, "r", errors="ignore") as f:
+            content = f.read(500)
+        if "<html" in content.lower() or "<!doctype" in content.lower():
+            os.unlink(tmp.name)
+            raise ValueError(f"URL returned an HTML page instead of a video (size: {file_size} bytes). The download link may require authentication.")
+
     return tmp.name
 
 
@@ -150,9 +175,15 @@ def convert_video(data):
         tmp_path = download_video(video_url)
 
         # Open with OpenCV
+        file_size = os.path.getsize(tmp_path)
         cap = cv2.VideoCapture(tmp_path)
         if not cap.isOpened():
-            return jsonify({"error": "Could not open video"}), 400
+            return jsonify({
+                "error": "Could not open video",
+                "file_size_bytes": file_size,
+                "url_used": video_url[:200],
+                "hint": "Make sure the URL is a direct video link (.mp4/.webm) and not a page that requires login/auth"
+            }), 400
 
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         if original_fps <= 0:
