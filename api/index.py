@@ -193,18 +193,21 @@ def convert_video(data):
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
         # First pass: check if video is black and white (sample a few frames)
-        sample_indices = np.linspace(0, total_frames - 1, min(10, total_frames), dtype=int)
-        bw_votes = 0
-        for idx in sample_indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-            ret, sample_frame = cap.read()
-            if ret and is_black_and_white(sample_frame):
-                bw_votes += 1
+        bw_only = False
+        if total_frames > 0:
+            sample_indices = np.linspace(0, total_frames - 1, min(10, total_frames), dtype=int)
+            bw_votes = 0
+            for idx in sample_indices:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                ret, sample_frame = cap.read()
+                if ret and is_black_and_white(sample_frame):
+                    bw_votes += 1
+            bw_only = bw_votes > len(sample_indices) * 0.8
 
-        bw_only = bw_votes > len(sample_indices) * 0.8  # 80%+ frames are BW
+        # Close and reopen for clean second pass (seeking can be buggy with some codecs)
+        cap.release()
+        cap = cv2.VideoCapture(tmp_path)
 
-        # Second pass: extract frames
-        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         frames = []
         frame_count = 0
 
@@ -229,7 +232,14 @@ def convert_video(data):
             "frame_count": len(frames),
             "dimensions": f"{FRAME_WIDTH}x{FRAME_HEIGHT}",
             "black_and_white": bw_only,
-            "fps": target_fps
+            "fps": target_fps,
+            "debug": {
+                "original_fps": original_fps,
+                "total_frames_in_video": total_frames,
+                "frame_interval": frame_interval,
+                "frames_scanned": frame_count,
+                "file_size_bytes": file_size
+            }
         })
 
     except Exception as e:
