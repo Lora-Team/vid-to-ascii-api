@@ -2,3 +2,4 @@ flask==3.0.0
 numpy==1.26.4
 imageio-ffmpeg==0.4.9
 imageio==2.34.0
+setuptools>=69.0.0
