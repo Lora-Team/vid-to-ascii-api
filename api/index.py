@@ -86,34 +86,39 @@ def home():
 def convert():
     import json as jsonlib
 
-    # Try multiple ways to parse the body (DiamondFire may not send Content-Type header)
+    raw = request.get_data(as_text=True)
     data = None
+    parse_method = "none"
 
-    # 1. Try normal JSON parsing
-    data = request.get_json(silent=True)
-
-    # 2. Try force-parsing the raw body as JSON
-    if not data:
+    # 1. Try force-parsing the raw body as JSON (most reliable)
+    try:
+        data = jsonlib.loads(raw)
+        parse_method = "raw_json"
+    except Exception as e1:
+        # 2. Try normal Flask JSON parsing
         try:
-            raw = request.get_data(as_text=True)
-            data = jsonlib.loads(raw)
-        except Exception:
-            pass
+            data = request.get_json(force=True, silent=False)
+            parse_method = "flask_force"
+        except Exception as e2:
+            # 3. Try form data
+            if request.form:
+                data = dict(request.form)
+                parse_method = "form"
+            # 4. Try query params
+            elif request.args:
+                data = dict(request.args)
+                parse_method = "query"
 
-    # 3. Try form data
-    if not data and request.form:
-        data = dict(request.form)
-
-    # 4. Try query params as fallback
-    if not data and request.args:
-        data = dict(request.args)
-
-    if not data or "url" not in data:
+    if not data or not isinstance(data, dict) or "url" not in data:
         return jsonify({
             "error": "Missing 'url' in request body",
             "hint": "Send JSON like: {\"url\": \"https://example.com/video.mp4\"}",
             "received_content_type": request.content_type,
-            "received_body": request.get_data(as_text=True)[:500]
+            "received_body": raw[:1000],
+            "parse_method": parse_method,
+            "data_type": str(type(data)),
+            "data_keys": list(data.keys()) if isinstance(data, dict) else None,
+            "data_preview": str(data)[:500] if data else None
         }), 400
 
     return convert_video(data)
