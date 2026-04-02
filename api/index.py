@@ -6,43 +6,66 @@ import urllib.request
 import subprocess
 import json as jsonlib
 import re
-import struct
 
 app = Flask(__name__)
 
 FRAME_WIDTH = 80
 FRAME_HEIGHT = 20
-FFMPEG_PATH = "/tmp/ffmpeg"
 
 
-def ensure_ffmpeg():
-    """Download a static ffmpeg binary if not present."""
-    if os.path.exists(FFMPEG_PATH) and os.access(FFMPEG_PATH, os.X_OK):
-        return FFMPEG_PATH
+def find_ffmpeg():
+    """Find ffmpeg binary - try multiple methods."""
+    # Method 1: Try imageio-ffmpeg (has bundled binary)
+    try:
+        import imageio_ffmpeg
+        path = imageio_ffmpeg.get_ffmpeg_exe()
+        if os.path.exists(path):
+            return path
+    except Exception:
+        pass
 
-    url = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
-    tar_path = "/tmp/ffmpeg.tar.xz"
+    # Method 2: Check if ffmpeg is on PATH
+    try:
+        r = subprocess.run(["which", "ffmpeg"], capture_output=True, text=True)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except Exception:
+        pass
 
-    # Download
-    req = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0"
-    })
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        with open(tar_path, "wb") as f:
+    # Method 3: Common locations
+    for p in ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/tmp/ffmpeg"]:
+        if os.path.exists(p):
+            return p
+
+    # Method 4: Download static binary as last resort
+    return download_ffmpeg()
+
+
+def download_ffmpeg():
+    """Download a small static ffmpeg binary."""
+    dest = "/tmp/ffmpeg"
+    if os.path.exists(dest) and os.access(dest, os.X_OK):
+        return dest
+
+    # Single binary from eugeneware/ffmpeg-static GitHub releases - no extraction needed
+    url = "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-linux-x64"
+
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        with open(dest, "wb") as f:
             f.write(resp.read())
 
-    # Extract just the ffmpeg binary
-    subprocess.run(
-        ["tar", "-xf", tar_path, "--wildcards", "*/ffmpeg", "--strip-components=1", "-C", "/tmp"],
-        check=True, timeout=30
-    )
-    os.chmod(FFMPEG_PATH, 0o755)
+    os.chmod(dest, 0o755)
+    return dest
 
-    # Cleanup
-    if os.path.exists(tar_path):
-        os.unlink(tar_path)
 
-    return FFMPEG_PATH
+_ffmpeg_path = None
+
+def get_ffmpeg():
+    global _ffmpeg_path
+    if _ffmpeg_path is None:
+        _ffmpeg_path = find_ffmpeg()
+    return _ffmpeg_path
 
 
 def download_video(url):
@@ -71,31 +94,8 @@ def download_video(url):
     return tmp.name
 
 
-def get_video_info(ffmpeg, path):
-    """Get video info using ffprobe (bundled with ffmpeg)."""
-    ffprobe = ffmpeg.replace("ffmpeg", "ffprobe")
-    if not os.path.exists(ffprobe):
-        ffprobe = ffmpeg  # fallback
-
-    try:
-        r = subprocess.run(
-            [ffprobe, "-v", "quiet", "-print_format", "json",
-             "-show_streams", "-show_format", path],
-            capture_output=True, text=True, timeout=10
-        )
-        info = jsonlib.loads(r.stdout)
-        for s in info.get("streams", []):
-            if s.get("codec_type") == "video":
-                fps_parts = s.get("r_frame_rate", "30/1").split("/")
-                fps = float(fps_parts[0]) / float(fps_parts[1]) if len(fps_parts) == 2 else 30.0
-                return {"fps": fps}
-    except Exception:
-        pass
-    return {"fps": 30}
-
-
-def extract_frames(ffmpeg, path, target_fps, max_frames):
-    """Extract frames as raw RGB using ffmpeg."""
+def extract_frames(path, target_fps, max_frames):
+    ffmpeg = get_ffmpeg()
     cmd = [
         ffmpeg, "-i", path,
         "-vf", f"fps={target_fps},scale={FRAME_WIDTH}:{FRAME_HEIGHT}",
@@ -103,8 +103,7 @@ def extract_frames(ffmpeg, path, target_fps, max_frames):
         "-f", "rawvideo",
         "-frames:v", str(max_frames),
         "-v", "quiet",
-        "-y",
-        "pipe:1"
+        "-y", "pipe:1"
     ]
 
     r = subprocess.run(cmd, capture_output=True, timeout=60)
@@ -119,8 +118,7 @@ def extract_frames(ffmpeg, path, target_fps, max_frames):
     for i in range(count):
         offset = i * frame_size
         frame = np.frombuffer(raw[offset:offset + frame_size], dtype=np.uint8)
-        frame = frame.reshape(FRAME_HEIGHT, FRAME_WIDTH, 3)
-        frames.append(frame)
+        frames.append(frame.reshape(FRAME_HEIGHT, FRAME_WIDTH, 3))
 
     return frames
 
@@ -207,29 +205,21 @@ def convert_video(data):
 
     tmp_path = None
     try:
-        # Ensure ffmpeg is available
-        ffmpeg = ensure_ffmpeg()
-
-        # Download video
         tmp_path = download_video(video_url)
         file_size = os.path.getsize(tmp_path)
 
-        # Extract frames
-        frames = extract_frames(ffmpeg, tmp_path, target_fps, max_frames)
+        frames = extract_frames(tmp_path, target_fps, max_frames)
 
         if not frames:
-            info = get_video_info(ffmpeg, tmp_path)
             return jsonify({
                 "error": "No frames extracted",
                 "file_size": file_size,
-                "video_info": info
+                "ffmpeg": get_ffmpeg()
             }), 400
 
-        # Check BW
         sample = frames[::max(1, len(frames) // 10)]
         bw_only = sum(1 for f in sample if is_bw(f)) > len(sample) * 0.8
 
-        # Convert to ASCII
         ascii_frames = [frame_to_ascii(f, bw_only=bw_only) for f in frames]
 
         return jsonify({
