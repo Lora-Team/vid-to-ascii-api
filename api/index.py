@@ -62,6 +62,10 @@ def frame_to_ascii(frame: np.ndarray, bw_only: bool = False) -> str:
 
 @app.route("/", methods=["GET"])
 def home():
+    # If query params include a url, treat as a convert request
+    if request.args.get("url"):
+        return convert_video(dict(request.args))
+
     return jsonify({
         "status": "ok",
         "usage": {
@@ -72,6 +76,7 @@ def home():
                 "fps": 10,
                 "max_frames": 100
             },
+            "alt_method": "GET /?url=https://example.com/video.mp4&fps=10&max_frames=100",
             "description": "Send a video URL and get back a list of ASCII frames with hex color codes, sized for Minecraft tab list (80x20)."
         }
     })
@@ -79,14 +84,46 @@ def home():
 
 @app.route("/", methods=["POST"])
 def convert():
-    data = request.get_json()
+    import json as jsonlib
+
+    # Try multiple ways to parse the body (DiamondFire may not send Content-Type header)
+    data = None
+
+    # 1. Try normal JSON parsing
+    data = request.get_json(silent=True)
+
+    # 2. Try force-parsing the raw body as JSON
+    if not data:
+        try:
+            raw = request.get_data(as_text=True)
+            data = jsonlib.loads(raw)
+        except Exception:
+            pass
+
+    # 3. Try form data
+    if not data and request.form:
+        data = dict(request.form)
+
+    # 4. Try query params as fallback
+    if not data and request.args:
+        data = dict(request.args)
 
     if not data or "url" not in data:
-        return jsonify({"error": "Missing 'url' in request body"}), 400
+        return jsonify({
+            "error": "Missing 'url' in request body",
+            "hint": "Send JSON like: {\"url\": \"https://example.com/video.mp4\"}",
+            "received_content_type": request.content_type,
+            "received_body": request.get_data(as_text=True)[:500]
+        }), 400
 
+    return convert_video(data)
+
+
+def convert_video(data):
+    """Shared video conversion logic for both GET and POST."""
     video_url = data["url"]
-    target_fps = data.get("fps", 10)
-    max_frames = data.get("max_frames", 100)
+    target_fps = int(data.get("fps", 10))
+    max_frames = int(data.get("max_frames", 100))
 
     tmp_path = None
     try:
